@@ -344,7 +344,7 @@ class UserQuery:
     
     def order_by(self, field):
         """Add order by clause"""
-        self.order_by_field = field
+        self.order_by = field
         return self
     
     def limit(self, count):
@@ -376,8 +376,8 @@ class UserQuery:
         where_clause = " AND ".join(self.conditions) if self.conditions else "true"
         query = f"MATCH (u:User) WHERE {where_clause} RETURN u"
         
-        if self.order_by_field:
-            query += f" ORDER BY u.{self.order_by_field}"
+        if self.order_by:
+            query += f" ORDER BY u.{self.order_by}"
         if self.limit_val:
             query += f" LIMIT {self.limit_val}"
         
@@ -418,7 +418,15 @@ class Book(BaseGraphModel):
         """Save book and create relationship with user"""
         if not self.id:
             self.id = self.get_next_id('Book')
-        
+            # This is a new book, use CREATE
+            self._create_new_book()
+        else:
+            # This is an existing book, use UPDATE
+            self._update_existing_book()
+        return self
+    
+    def _create_new_book(self):
+        """Create a new book node and relationship"""
         # Create book node
         book_query = """
         CREATE (b:Book {
@@ -481,7 +489,50 @@ class Book(BaseGraphModel):
         }
         
         kuzu_db.execute_query(rel_query, rel_params)
-        return self
+    
+    def _update_existing_book(self):
+        """Update an existing book node"""
+        book_query = """
+        MATCH (b:Book {id: $id})
+        SET b.title = $title,
+            b.author = $author,
+            b.isbn = $isbn,
+            b.start_date = $start_date,
+            b.finish_date = $finish_date,
+            b.cover_url = $cover_url,
+            b.want_to_read = $want_to_read,
+            b.library_only = $library_only,
+            b.description = $description,
+            b.published_date = $published_date,
+            b.page_count = $page_count,
+            b.categories = $categories,
+            b.publisher = $publisher,
+            b.language = $language,
+            b.average_rating = $average_rating,
+            b.rating_count = $rating_count
+        """
+        
+        book_params = {
+            'id': self.id,
+            'title': self.title,
+            'author': self.author,
+            'isbn': self.isbn,
+            'start_date': self.start_date,
+            'finish_date': self.finish_date,
+            'cover_url': self.cover_url,
+            'want_to_read': self.want_to_read,
+            'library_only': self.library_only,
+            'description': self.description,
+            'published_date': self.published_date,
+            'page_count': self.page_count,
+            'categories': self.categories,
+            'publisher': self.publisher,
+            'language': self.language,
+            'average_rating': self.average_rating,
+            'rating_count': self.rating_count
+        }
+        
+        kuzu_db.execute_query(book_query, book_params)
     
     @classmethod
     def query(cls):

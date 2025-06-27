@@ -77,7 +77,7 @@ EXPOSE 5054
 ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Start the app with Gunicorn in production mode
-# Use WORKERS environment variable for Gunicorn workers Default to 6 workers if not specified
-ENV WORKERS=6
+# Use WORKERS environment variable for Gunicorn workers - Kuzu requires single worker
+ENV WORKERS=1
 # Set timeout to 300 seconds (5 minutes) to handle bulk imports with rate limiting
 CMD ["sh", "-c", "gunicorn -w $WORKERS -b 0.0.0.0:5054 --timeout 300 run:app"]

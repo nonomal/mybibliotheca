@@ -22,7 +22,7 @@ services:
       - FLASK_DEBUG=true
       
       # Development Gunicorn settings
-      - WORKERS=2
+      - WORKERS=1  # Kuzu requires single worker for database safety
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5054/"]

@@ -13,5 +13,5 @@ services:
       
       # Application settings
       - TIMEZONE=${TIMEZONE:-UTC}
-      - WORKERS=${WORKERS:-4}
+      - WORKERS=1  # Kuzu requires single worker for database safety
     restart: unless-stopped

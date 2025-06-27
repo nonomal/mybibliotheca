@@ -5,6 +5,7 @@ import shutil
 
 # Import Kuzu graph models
 from .graph_models import Book, ReadingLog, User, session as db
+from kuzu_config import kuzu_db
 
 from .utils import fetch_book_data, get_reading_streak, get_google_books_cover, generate_month_review_image
 from datetime import datetime, date, timedelta
@@ -527,14 +528,37 @@ def edit_book(uid):
 @bp.route('/month_review/<int:year>/<int:month>.jpg')
 @login_required  
 def month_review(year, month):
+    # Build date range for the month
+    start_date = datetime(year, month, 1).strftime('%Y-%m-%d')
+    if month == 12:
+        end_date = datetime(year + 1, 1, 1).strftime('%Y-%m-%d')
+    else:
+        end_date = datetime(year, month + 1, 1).strftime('%Y-%m-%d')
+    
     # Query books finished in the given month/year by current user
-    books = Book.query().filter_by(user_id=current_user.id).filter(
-        Book.finish_date.isnot(None),
-        Book.finish_date >= datetime(year, month, 1),
-        Book.finish_date < (
-            datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
-        )
-    ).all()
+    query = """
+    MATCH (u:User {id: $user_id})-[:OWNS]->(b:Book)
+    WHERE b.finish_date IS NOT NULL 
+      AND b.finish_date >= $start_date 
+      AND b.finish_date < $end_date
+    RETURN b
+    """
+    
+    params = {
+        'user_id': current_user.id,
+        'start_date': start_date,
+        'end_date': end_date
+    }
+    
+    try:
+        result = kuzu_db.execute_query(query, params)
+        books = []
+        while result.has_next():
+            book_data = result.get_next()[0]
+            books.append(Book._from_dict(book_data, current_user.id))
+    except Exception as e:
+        current_app.logger.error(f"Error fetching month review books: {e}")
+        books = []
     
     if not books:
         # This should only be accessed if there are books (from month_wrapup)
@@ -555,14 +579,37 @@ def month_wrapup():
     year = now_ca.year
     month = now_ca.month
     
-    # Check if there are books finished this month
-    books = Book.query().filter_by(user_id=current_user.id).filter(
-        Book.finish_date.isnot(None),
-        Book.finish_date >= datetime(year, month, 1),
-        Book.finish_date < (
-            datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
-        )
-    ).all()
+    # Build date range for the month
+    start_date = datetime(year, month, 1).strftime('%Y-%m-%d')
+    if month == 12:
+        end_date = datetime(year + 1, 1, 1).strftime('%Y-%m-%d')
+    else:
+        end_date = datetime(year, month + 1, 1).strftime('%Y-%m-%d')
+    
+    # Query books finished this month using Kuzu syntax
+    query = """
+    MATCH (u:User {id: $user_id})-[:OWNS]->(b:Book)
+    WHERE b.finish_date IS NOT NULL 
+      AND b.finish_date >= $start_date 
+      AND b.finish_date < $end_date
+    RETURN b
+    """
+    
+    params = {
+        'user_id': current_user.id,
+        'start_date': start_date,
+        'end_date': end_date
+    }
+    
+    try:
+        result = kuzu_db.execute_query(query, params)
+        books = []
+        while result.has_next():
+            book_data = result.get_next()[0]
+            books.append(Book._from_dict(book_data, current_user.id))
+    except Exception as e:
+        current_app.logger.error(f"Error fetching month wrap-up books: {e}")
+        books = []
     
     if not books:
         # Show empty month template instead of redirecting to image route
