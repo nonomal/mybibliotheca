@@ -119,20 +119,20 @@ class User(UserMixin, db.Model):
         if self.failed_login_attempts >= 5:
             # Lock account for 30 minutes
             self.locked_until = datetime.now(timezone.utc) + timedelta(minutes=30)
-        db.session.commit()
+        # Legacy SQLAlchemy method - replaced by Kuzu
     
     def reset_failed_login(self):
         """Reset failed login attempts (called on successful login)"""
         self.failed_login_attempts = 0
         self.locked_until = None
         self.last_login = datetime.now(timezone.utc)
-        db.session.commit()
+        # Legacy SQLAlchemy method - replaced by Kuzu
     
     def unlock_account(self):
         """Admin function to unlock a locked account"""
         self.failed_login_attempts = 0
         self.locked_until = None
-        db.session.commit()
+        # Legacy SQLAlchemy method - replaced by Kuzu
     
     def get_reading_streak(self):
         """Get the user's current reading streak with their personal offset"""
@@ -191,8 +191,7 @@ class Book(db.Model):
         # If you have other fields, set them here or with kwargs
 
     def save(self):
-        db.session.add(self)
-        db.session.commit()
+        self.save()
 
     @classmethod
     def get_all_books(cls):

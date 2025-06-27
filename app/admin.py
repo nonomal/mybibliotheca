@@ -6,10 +6,12 @@ Provides admin-only decorators, middleware, and management functions
 from functools import wraps
 from flask import Blueprint, render_template, redirect, url_for, flash, request, jsonify, abort
 from flask_login import login_required, current_user
-from .models import User, Book, ReadingLog, db
+
+# Import Kuzu graph models
+from .graph_models import User, Book, ReadingLog, session as db
+
 from .forms import UserProfileForm, AdminPasswordResetForm
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import func
 
 admin = Blueprint('admin', __name__, url_prefix='/admin')
 
@@ -68,10 +70,10 @@ def dashboard():
     
     # Get recent user registrations (last 30 days)
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    recent_users = User.query.filter(User.created_at >= thirty_days_ago).order_by(User.created_at.desc()).limit(10).all()
+    recent_users = User.query().filter(User.created_at >= thirty_days_ago).order_by(User.created_at.desc()).limit(10).all()
     
     # Get recent book additions (last 30 days)  
-    recent_books = Book.query.filter(Book.created_at >= thirty_days_ago).order_by(Book.created_at.desc()).limit(10).all()
+    recent_books = Book.query().filter(Book.created_at >= thirty_days_ago).order_by(Book.created_at.desc()).limit(10).all()
     
     return render_template('admin/dashboard.html', 
                          title='Admin Dashboard',
@@ -112,28 +114,29 @@ def users():
 @admin_required
 def user_detail(user_id):
     """Individual user management"""
-    user = User.query.get_or_404(user_id)
+    user = User.query().get_or_404(user_id)
     
     # Get user statistics
-    book_count = Book.query.filter_by(user_id=user.id).count()
-    reading_count = ReadingLog.query.filter_by(user_id=user.id).count()
+    book_count = Book.query().filter_by(user_id=user.id).count()
+    reading_count = ReadingLog.query().filter_by(user_id=user.id).count()
     
     # Get more detailed stats
-    from sqlalchemy import extract
     current_year = datetime.now().year
-    books_this_year = Book.query.filter(
-        Book.user_id == user.id,
-        extract('year', Book.created_at) == current_year
-    ).count()
+    # Get all books for the user and filter by year in Python
+    all_user_books = Book.query().filter_by(user_id=user.id).all()
+    books_this_year = len([
+        book for book in all_user_books 
+        if book.created_at and book.created_at.year == current_year
+    ])
     
-    logs_this_month = ReadingLog.query.filter(
+    logs_this_month = ReadingLog.query().filter(
         ReadingLog.user_id == user.id,
         ReadingLog.created_at >= datetime.now().replace(day=1)
     ).count()
     
     # Get recent activity
-    recent_books = Book.query.filter_by(user_id=user.id).order_by(Book.created_at.desc()).limit(5).all()
-    recent_logs = ReadingLog.query.filter_by(user_id=user.id).order_by(ReadingLog.created_at.desc()).limit(10).all()
+    recent_books = Book.query().filter_by(user_id=user.id).order_by(Book.created_at.desc()).limit(5).all()
+    recent_logs = ReadingLog.query().filter_by(user_id=user.id).order_by(ReadingLog.created_at.desc()).limit(10).all()
     
     return render_template('admin/user_detail.html',
                          title=f'User: {user.username}',
@@ -150,18 +153,18 @@ def user_detail(user_id):
 @admin_required
 def toggle_admin(user_id):
     """Toggle admin status for a user"""
-    user = User.query.get_or_404(user_id)
+    user = User.query().get_or_404(user_id)
     
     # Prevent removing admin from the last admin
     if user.is_admin:
-        admin_count = User.query.filter_by(is_admin=True).count()
+        admin_count = User.query().filter_by(is_admin=True).count()
         if admin_count <= 1:
             flash('Cannot remove admin privileges from the last admin user.', 'error')
             return redirect(url_for('admin.user_detail', user_id=user_id))
     
     # Toggle admin status
     user.is_admin = not user.is_admin
-    db.session.commit()
+    user.update()
     
     action = 'granted' if user.is_admin else 'removed'
     flash(f'Admin privileges {action} for user {user.username}.', 'success')
@@ -173,7 +176,7 @@ def toggle_admin(user_id):
 @admin_required
 def toggle_active(user_id):
     """Toggle active status for a user"""
-    user = User.query.get_or_404(user_id)
+    user = User.query().get_or_404(user_id)
     
     # Prevent deactivating the current admin
     if user.id == current_user.id:
@@ -182,7 +185,7 @@ def toggle_active(user_id):
     
     # Toggle active status
     user.is_active = not user.is_active
-    db.session.commit()
+    user.update()
     
     status = 'activated' if user.is_active else 'deactivated'
     flash(f'User {user.username} has been {status}.', 'success')
@@ -194,7 +197,7 @@ def toggle_active(user_id):
 @admin_required
 def delete_user(user_id):
     """Delete a user and handle their data"""
-    user = User.query.get_or_404(user_id)
+    user = User.query().get_or_404(user_id)
     
     # Prevent deleting own account
     if user.id == current_user.id:
@@ -203,16 +206,26 @@ def delete_user(user_id):
     
     # Prevent deleting the last admin
     if user.is_admin:
-        admin_count = User.query.filter_by(is_admin=True).count()
+        admin_count = User.query().filter_by(is_admin=True).count()
         if admin_count <= 1:
             flash('Cannot delete the last admin user.', 'error')
             return redirect(url_for('admin.user_detail', user_id=user_id))
     
     username = user.username
     
-    # Delete user (cascades will handle books and logs)
-    db.session.delete(user)
-    db.session.commit()
+    # Delete user and associated data manually for Kuzu
+    # First delete user's books
+    user_books = Book.query().filter_by(user_id=user.id).all()
+    for book in user_books:
+        book.delete()
+    
+    # Delete user's reading logs
+    user_logs = ReadingLog.query().filter_by(user_id=user.id).all()
+    for log in user_logs:
+        log.delete()
+    
+    # Finally delete the user
+    user.delete()
     
     flash(f'User {username} and all associated data have been deleted.', 'success')
     return redirect(url_for('admin.users'))
@@ -237,7 +250,7 @@ def api_stats():
 @admin_required
 def reset_user_password(user_id):
     """Admin function to reset a user's password"""
-    user = User.query.get_or_404(user_id)
+    user = User.query().get_or_404(user_id)
     form = AdminPasswordResetForm()
     
     if form.validate_on_submit():
@@ -248,7 +261,7 @@ def reset_user_password(user_id):
                 user.password_must_change = True
             # Also unlock the account if it was locked
             user.unlock_account()
-            db.session.commit()
+            user.update()
             
             force_msg = " User will be required to change password on next login." if form.force_change.data else ""
             flash(f'Password reset successfully for user {user.username}.{force_msg}', 'success')
@@ -266,7 +279,7 @@ def reset_user_password(user_id):
 @admin_required
 def unlock_user_account(user_id):
     """Admin function to unlock a locked user account"""
-    user = User.query.get_or_404(user_id)
+    user = User.query().get_or_404(user_id)
     
     if user.is_locked():
         user.unlock_account()
@@ -278,23 +291,27 @@ def unlock_user_account(user_id):
 
 def get_system_stats():
     """Get system statistics for admin dashboard"""
-    total_users = User.query.count()
-    active_users = User.query.filter_by(is_active=True).count()
-    admin_users = User.query.filter_by(is_admin=True).count()
-    total_books = Book.query.count()
+    total_users = User.query().count()
+    active_users = User.query().filter_by(is_active=True).count()
+    admin_users = User.query().filter_by(is_admin=True).count()
+    total_books = Book.query().count()
     
     # Users registered in last 30 days
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    new_users_30d = User.query.filter(User.created_at >= thirty_days_ago).count()
+    new_users_30d = User.query().filter(User.created_at >= thirty_days_ago).count()
     
     # Books added in last 30 days
-    new_books_30d = Book.query.filter(Book.created_at >= thirty_days_ago).count()
+    new_books_30d = Book.query().filter(Book.created_at >= thirty_days_ago).count()
     
     # Most active users (by book count)
-    top_users = db.session.query(
-        User.username,
-        func.count(Book.id).label('book_count')
-    ).join(Book).group_by(User.id).order_by(func.count(Book.id).desc()).limit(5).all()
+    # Get all users and count their books
+    all_users = User.query().all()
+    user_book_counts = []
+    for user in all_users:
+        book_count = Book.query().filter_by(user_id=user.id).count()
+        if book_count > 0:
+            user_book_counts.append({'username': user.username, 'book_count': book_count})
+    top_users = sorted(user_book_counts, key=lambda x: x['book_count'], reverse=True)[:5]
     
     # System health info (with fallback if psutil not available)
     system_info = {}
@@ -337,28 +354,28 @@ def is_admin(user):
 
 def promote_user_to_admin(user_id):
     """Promote a user to admin status"""
-    user = User.query.get(user_id)
+    user = User.query().get(user_id)
     if user:
         user.is_admin = True
-        db.session.commit()
+        user.update()
         return True
     return False
 
 def demote_admin_user(user_id):
     """Demote an admin user (with safety checks)"""
-    user = User.query.get(user_id)
+    user = User.query().get(user_id)
     if user and user.is_admin:
         # Check if this is the last admin
-        admin_count = User.query.filter_by(is_admin=True).count()
+        admin_count = User.query().filter_by(is_admin=True).count()
         if admin_count > 1:
             user.is_admin = False
-            db.session.commit()
+            user.update()
             return True
     return False
 
 def unlock_user_account_by_id(user_id):
     """Helper function to unlock a user account"""
-    user = User.query.get(user_id)
+    user = User.query().get(user_id)
     if user:
         user.unlock_account()
         return True

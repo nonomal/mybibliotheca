@@ -1,7 +1,10 @@
 from flask import Blueprint, render_template, redirect, url_for, flash, request
 from flask_login import login_user, logout_user, login_required, current_user
 from werkzeug.security import check_password_hash, generate_password_hash
-from app.models import User, db
+
+# Import Kuzu graph models
+from .graph_models import User, session as db
+
 from wtforms import IntegerField, SubmitField
 from wtforms.validators import Optional, NumberRange
 from flask_wtf import FlaskForm
@@ -19,7 +22,7 @@ def setup():
     debug_auth("Setup route accessed")
     
     # Check if any users already exist
-    if User.query.count() > 0:
+    if User.query().count() > 0:
         debug_auth("Users already exist, redirecting to login")
         flash('Setup has already been completed.', 'info')
         return redirect(url_for('auth.login'))
@@ -40,8 +43,7 @@ def setup():
             )
             admin_user.set_password(form.password.data)
             
-            db.session.add(admin_user)
-            db.session.commit()
+            admin_user.save()
             
             debug_auth(f"First admin user created: {admin_user.username}")
             
@@ -53,7 +55,6 @@ def setup():
             
         except Exception as e:
             debug_auth(f"Setup failed: {e}")
-            db.session.rollback()
             flash('Setup failed. Please try again.', 'error')
     else:
         if request.method == 'POST':
@@ -86,10 +87,9 @@ def login():
         debug_csrf("Form validation passed, checking CSRF")
         
         # Try to find user by username or email
-        user = User.query.filter(
-            (User.username == form.username.data) | 
-            (User.email == form.username.data)
-        ).first()
+        user = User.query().filter_by(username=form.username.data).first()
+        if not user:
+            user = User.query().filter_by(email=form.username.data).first()
         
         if user:
             debug_auth(f"User found: {user.username} (ID: {user.id})")
@@ -113,9 +113,9 @@ def login():
                 login_user(user, remember=form.remember_me.data)
                 debug_auth(f"User logged in successfully: {user.username}")
                 
-                # Ensure session is committed before checking password requirements
-                db.session.commit()
-                debug_session("Database session committed after login")
+                # Update user login time
+                user.update()
+                debug_session("User updated after login")
                 
                 # Check if user must change password
                 if user.password_must_change:
@@ -152,7 +152,8 @@ def logout():
     logout_user()
     
     # Clear the session to ensure CSRF tokens are regenerated
-    session.clear()
+    from flask import session as flask_session
+    flask_session.clear()
     
     flash(f'Goodbye, {username}!', 'info')
     return redirect(url_for('main.index'))
@@ -175,7 +176,7 @@ def register():
             user.set_password(form.password.data)
             
             # Check if this is the very first user in the system
-            if User.query.count() == 0:
+            if User.query().count() == 0:
                 user.is_admin = True
                 # First admin must change password on first login
                 user.password_must_change = True
@@ -184,8 +185,7 @@ def register():
                 # New users created by admin should change password on first login
                 user.password_must_change = True
             
-            db.session.add(user)
-            db.session.commit()
+            user.save()
             
             flash(f'User {user.username} has been created successfully! They will be required to change their password on first login.', 'success')
             return redirect(url_for('admin.users'))
@@ -202,7 +202,7 @@ def profile():
     if form.validate_on_submit():
         current_user.username = form.username.data
         current_user.email = form.email.data
-        db.session.commit()
+        current_user.update()
         flash('Your profile has been updated.', 'success')
         return redirect(url_for('auth.profile'))
     elif request.method == 'GET':
@@ -220,7 +220,7 @@ def change_password():
         if current_user.check_password(form.current_password.data):
             try:
                 current_user.set_password(form.new_password.data)
-                db.session.commit()
+                current_user.update()
                 flash('Your password has been changed.', 'success')
                 return redirect(url_for('auth.profile'))
             except ValueError as e:
@@ -249,7 +249,7 @@ def forced_password_change():
         
         try:
             current_user.set_password(form.new_password.data)
-            db.session.commit()
+            current_user.update()
             debug_auth("Password changed successfully")
             flash('Your password has been changed successfully. You can now continue using the application.', 'success')
             return redirect(url_for('main.index'))
@@ -301,7 +301,7 @@ def privacy_settings():
         current_user.share_current_reading = form.share_current_reading.data
         current_user.share_reading_activity = form.share_reading_activity.data
         current_user.share_library = form.share_library.data
-        db.session.commit()
+        current_user.update()
         flash('Privacy settings updated successfully!', 'success')
         return redirect(url_for('auth.privacy_settings'))
     
@@ -313,30 +313,24 @@ def privacy_settings():
 @auth.route('/my_activity')
 @login_required
 def my_activity():
-    from .models import Book, ReadingLog
-    from sqlalchemy import func
+    from .graph_models import Book, ReadingLog
     
     # Get user's reading statistics
-    total_books = Book.query.filter_by(user_id=current_user.id).count()
+    total_books = Book.query().filter_by(user_id=current_user.id).count()
     
     # Get reading logs count
-    reading_logs = ReadingLog.query.filter_by(user_id=current_user.id).count()
+    reading_logs = ReadingLog.query().filter_by(user_id=current_user.id).count()
     
-    # Get books added this year
+    # Get books added this year (simplified for Kuzu)
     current_year = datetime.now(timezone.utc).year
-    books_this_year = Book.query.filter_by(user_id=current_user.id).filter(
-        func.strftime('%Y', Book.created_at) == str(current_year)
-    ).count()
+    all_books = Book.query().filter_by(user_id=current_user.id).all()
+    books_this_year = len([b for b in all_books if b.created_at and b.created_at.year == current_year])
     
     # Get recent books (last 10)
-    recent_books = Book.query.filter_by(user_id=current_user.id).order_by(
-        Book.created_at.desc()
-    ).limit(10).all()
+    recent_books = Book.query().filter_by(user_id=current_user.id).limit(10).all()
     
     # Get recent reading logs (last 10)
-    recent_logs = ReadingLog.query.filter_by(user_id=current_user.id).order_by(
-        ReadingLog.date.desc()
-    ).limit(10).all()
+    recent_logs = ReadingLog.query().filter_by(user_id=current_user.id).limit(10).all()
     
     return render_template('auth/my_activity.html', 
                          title='My Activity',
@@ -353,7 +347,7 @@ def update_streak_settings():
     
     if form.validate_on_submit():
         current_user.reading_streak_offset = form.reading_streak_offset.data or 0
-        db.session.commit()
+        current_user.update()
         flash('Reading streak settings updated successfully!', 'success')
     else:
         flash('Error updating streak settings. Please try again.', 'danger')

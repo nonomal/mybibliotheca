@@ -1,6 +1,11 @@
-from flask import Blueprint, current_app, render_template, request, redirect, url_for, jsonify, flash, send_file
+from flask import Blueprint, current_app, render_template, request, redirect, url_for, jsonify, flash, send_file, abort
 from flask_login import login_required, current_user
-from .models import Book, db, ReadingLog, User
+import os
+import shutil
+
+# Import Kuzu graph models
+from .graph_models import Book, ReadingLog, User, session as db
+
 from .utils import fetch_book_data, get_reading_streak, get_google_books_cover, generate_month_review_image
 from datetime import datetime, date, timedelta
 import secrets
@@ -9,7 +14,6 @@ from io import BytesIO
 import pytz
 import csv # Ensure csv is imported
 import calendar
-from sqlalchemy import or_
 
 bp = Blueprint('main', __name__)
 
@@ -30,12 +34,12 @@ def log_book():
 @bp.route('/reading_history', methods=['GET'])
 @login_required
 def reading_history():
-    books = Book.query.filter_by(user_id=current_user.id).all()  # Filter by current user
+    books = Book.query().filter_by(user_id=current_user.id).all()  # Filter by current user
     for book in books:
         if not book.uid:
             # Generate a uid if missing
             book.uid = secrets.token_urlsafe(6)
-            db.session.commit()
+            book.save()  # Save the updated book with the new uid
     return jsonify([book.to_dict() for book in books]), 200
 
 @bp.route('/fetch_book/<isbn>', methods=['GET'])
@@ -57,35 +61,50 @@ def index():
     category = request.args.get('category', '').strip()
     publisher = request.args.get('publisher', '').strip()
     language = request.args.get('language', '').strip()
+    status = request.args.get('status', '').strip()
     
-    # Start with all user's books
-    query = Book.query.filter_by(user_id=current_user.id)
+    # Get all user's books and filter in Python
+    all_books = Book.query().filter_by(user_id=current_user.id).all()
     
     # Apply search filter
     if search:
-        search_filter = or_(
-            Book.title.ilike(f'%{search}%'),
-            Book.author.ilike(f'%{search}%'),
-            Book.description.ilike(f'%{search}%'),
-            Book.categories.ilike(f'%{search}%'),
-            Book.publisher.ilike(f'%{search}%')
-        )
-        query = query.filter(search_filter)
+        search_lower = search.lower()
+        filtered_books = []
+        for book in all_books:
+            if (search_lower in (book.title or '').lower() or 
+                search_lower in (book.author or '').lower() or
+                search_lower in (book.description or '').lower() or
+                search_lower in (book.categories or '').lower() or
+                search_lower in (book.publisher or '').lower()):
+                filtered_books.append(book)
+        all_books = filtered_books
     
     # Apply category filter
     if category:
-        query = query.filter(Book.categories.ilike(f'%{category}%'))
+        category_lower = category.lower()
+        all_books = [b for b in all_books if category_lower in (b.categories or '').lower()]
     
     # Apply publisher filter
     if publisher:
-        query = query.filter(Book.publisher == publisher)
+        publisher_lower = publisher.lower()
+        all_books = [b for b in all_books if publisher_lower in (b.publisher or '').lower()]
     
     # Apply language filter
     if language:
-        query = query.filter(Book.language == language)
+        language_lower = language.lower()
+        all_books = [b for b in all_books if language_lower in (b.language or '').lower()]
     
-    # Get filtered books
-    all_filtered_books = query.all()
+    # Apply status filter
+    if status == 'want_to_read':
+        all_books = [b for b in all_books if b.want_to_read]
+    elif status == 'library_only':
+        all_books = [b for b in all_books if b.library_only]
+    elif status == 'started':
+        all_books = [b for b in all_books if b.start_date and not b.finish_date]
+    elif status == 'finished':
+        all_books = [b for b in all_books if b.finish_date]
+        
+    books = all_books
     
     # Sort books by reading status priority
     def get_sort_priority(book):
@@ -103,10 +122,10 @@ def index():
             return 4
     
     # Sort by priority first, then by title
-    books = sorted(all_filtered_books, key=lambda book: (get_sort_priority(book), book.title.lower()))
+    books = sorted(books, key=lambda book: (get_sort_priority(book), book.title.lower() if book.title else ''))
     
     # Get all books for filter options (unfiltered)
-    all_books = Book.query.filter_by(user_id=current_user.id).all()
+    all_books = Book.query().filter_by(user_id=current_user.id).all()
     
     # Extract unique values for filters
     categories = sorted(set([
@@ -168,7 +187,7 @@ def add_book():
 
             isbn = request.form['isbn']
             # Check for duplicate ISBN
-            if Book.query.filter_by(isbn=isbn, user_id=current_user.id).first():
+            if Book.query().filter_by(isbn=isbn, user_id=current_user.id).first():
                 flash('A book with this ISBN already exists.', 'danger')
                 return render_template('add_book.html', book_data=None)
 
@@ -239,7 +258,9 @@ def add_book():
 @bp.route('/book/<uid>', methods=['GET', 'POST'])
 @login_required
 def view_book(uid):
-    book = Book.query.filter_by(uid=uid, user_id=current_user.id).first_or_404()
+    book = Book.query().filter_by(uid=uid, user_id=current_user.id).first()
+    if not book:
+        abort(404)
     cover_url = book.cover_url  # Use the saved cover_url
     if request.method == 'POST':
         # Update start/finish dates
@@ -247,7 +268,7 @@ def view_book(uid):
         finish_date_str = request.form.get('finish_date')
         book.start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date() if start_date_str else None
         book.finish_date = datetime.strptime(finish_date_str, '%Y-%m-%d').date() if finish_date_str else None
-        db.session.commit()
+        book.save()  # Save the updated book
         flash('Book dates updated.')
         return redirect(url_for('main.view_book', uid=book.uid))
     return render_template('view_book.html', book=book, cover_url=cover_url)
@@ -255,7 +276,9 @@ def view_book(uid):
 @bp.route('/book/<uid>/log', methods=['POST'])
 @login_required
 def log_reading(uid):
-    book = Book.query.filter_by(uid=uid, user_id=current_user.id).first_or_404()
+    book = Book.query().filter_by(uid=uid, user_id=current_user.id).first()
+    if not book:
+        abort(404)
     log_date_str = request.form.get('log_date')
     
     # Use configured timezone instead of naive date.today()
@@ -268,30 +291,32 @@ def log_reading(uid):
         now_tz = datetime.now(timezone)
         log_date = now_tz.date()
     
-    existing_log = ReadingLog.query.filter_by(book_id=book.id, date=log_date).first()
+    existing_log = ReadingLog.query().filter_by(book_id=book.id, date=log_date).first()
     if existing_log:
         flash('You have already logged reading for this day.')
     else:
         log = ReadingLog(book_id=book.id, date=log_date, user_id=current_user.id)
-        db.session.add(log)
-        db.session.commit()
+        log.save()
         flash('Reading day logged.')
     return redirect(url_for('main.view_book', uid=book.uid))
 
 @bp.route('/book/<uid>/delete', methods=['POST'])
 @login_required
 def delete_book(uid):
-    book = Book.query.filter_by(uid=uid, user_id=current_user.id).first_or_404()
-    ReadingLog.query.filter_by(book_id=book.id).delete()
-    db.session.delete(book)
-    db.session.commit()
+    book = Book.query().filter_by(uid=uid, user_id=current_user.id).first()
+    if not book:
+        abort(404)
+    ReadingLog.query().filter_by(book_id=book.id).delete()
+    book.delete()
     flash('Book deleted successfully.')
     return redirect(url_for('main.index'))
 
 @bp.route('/book/<uid>/toggle_finished', methods=['POST'])
 @login_required
 def toggle_finished(uid):
-    book = Book.query.filter_by(uid=uid, user_id=current_user.id).first_or_404()
+    book = Book.query().filter_by(uid=uid, user_id=current_user.id).first()
+    if not book:
+        abort(404)
     
     # Use configured timezone for consistent date handling
     timezone = pytz.timezone(current_app.config.get('TIMEZONE', 'UTC'))
@@ -304,27 +329,31 @@ def toggle_finished(uid):
         now_tz = datetime.now(timezone)
         book.finish_date = now_tz.date()
         flash('Book marked as finished.')
-    db.session.commit()
+    book.save()  # Save the updated book
     return redirect(url_for('main.view_book', uid=book.uid))
 
 @bp.route('/book/<uid>/start_reading', methods=['POST'])
 @login_required
 def start_reading(uid):
-    book = Book.query.filter_by(uid=uid, user_id=current_user.id).first_or_404()
+    book = Book.query().filter_by(uid=uid, user_id=current_user.id).first()
+    if not book:
+        abort(404)
     book.want_to_read = False
     if not book.start_date:
         # Use configured timezone
         timezone = pytz.timezone(current_app.config.get('TIMEZONE', 'UTC'))
         now_tz = datetime.now(timezone)
         book.start_date = now_tz.date()
-    db.session.commit()
+    book.save()  # Save the updated book
     flash(f'Started reading "{book.title}".')
     return redirect(url_for('main.index'))
 
 @bp.route('/book/<uid>/update_status', methods=['POST'])
 @login_required
 def update_status(uid):
-    book = Book.query.filter_by(uid=uid, user_id=current_user.id).first_or_404()
+    book = Book.query().filter_by(uid=uid, user_id=current_user.id).first()
+    if not book:
+        abort(404)
     # Set status based on checkboxes
     book.want_to_read = 'want_to_read' in request.form
     book.library_only = 'library_only' in request.form
@@ -352,7 +381,7 @@ def update_status(uid):
         book.finish_date = None
         book.want_to_read = False
 
-    db.session.commit()
+    book.save()  # Save the updated book
     flash('Book status updated.')
     return redirect(url_for('main.view_book', uid=book.uid))
 
@@ -396,7 +425,7 @@ def library():
     search_query = request.args.get('search', '')
 
     # Start with books belonging to current user
-    books_query = Book.query.filter_by(user_id=current_user.id)
+    books_query = Book.query().filter_by(user_id=current_user.id)
 
     # Apply additional filters
     if category_filter:
@@ -415,7 +444,7 @@ def library():
     books = books_query.all()
 
     # Get distinct values for filter dropdowns
-    all_books = Book.query.filter_by(user_id=current_user.id).all()
+    all_books = Book.query().filter_by(user_id=current_user.id).all()
     categories = set()
     publishers = set()
     languages = set()
@@ -429,7 +458,7 @@ def library():
             languages.add(book.language)
 
     # Fetch all users for assignment
-    users = User.query.all()
+    users = User.query().all()
 
     return render_template(
         'library.html',
@@ -466,11 +495,13 @@ def public_library():
 @bp.route('/book/<uid>/edit', methods=['GET', 'POST'])
 @login_required
 def edit_book(uid):
-    book = Book.query.filter_by(uid=uid, user_id=current_user.id).first_or_404()
+    book = Book.query().filter_by(uid=uid, user_id=current_user.id).first()
+    if not book:
+        abort(404)
     if request.method == 'POST':
         new_isbn = request.form['isbn']
         # Check for duplicate ISBN (excluding the current book)
-        if Book.query.filter(Book.isbn == new_isbn, Book.uid != book.uid, Book.user_id == current_user.id).first():
+        if Book.query().filter(Book.isbn == new_isbn, Book.uid != book.uid, Book.user_id == current_user.id).first():
             flash('A book with this ISBN already exists.', 'danger')
             return render_template('edit_book.html', book=book)
         book.title = request.form['title']
@@ -488,7 +519,7 @@ def edit_book(uid):
         book.categories = request.form.get('categories', '').strip() or None
         book.average_rating = float(request.form.get('average_rating')) if request.form.get('average_rating', '').strip() else None
         book.rating_count = int(request.form.get('rating_count')) if request.form.get('rating_count', '').strip() else None
-        db.session.commit()
+        book.save()  # Save the updated book
         flash('Book updated.', 'success')
         return redirect(url_for('main.view_book', uid=book.uid))
     return render_template('edit_book.html', book=book)
@@ -497,8 +528,7 @@ def edit_book(uid):
 @login_required  
 def month_review(year, month):
     # Query books finished in the given month/year by current user
-    books = Book.query.filter(
-        Book.user_id == current_user.id,
+    books = Book.query().filter_by(user_id=current_user.id).filter(
         Book.finish_date.isnot(None),
         Book.finish_date >= datetime(year, month, 1),
         Book.finish_date < (
@@ -526,8 +556,7 @@ def month_wrapup():
     month = now_ca.month
     
     # Check if there are books finished this month
-    books = Book.query.filter(
-        Book.user_id == current_user.id,
+    books = Book.query().filter_by(user_id=current_user.id).filter(
         Book.finish_date.isnot(None),
         Book.finish_date >= datetime(year, month, 1),
         Book.finish_date < (
@@ -555,7 +584,7 @@ def add_book_from_search():
     cover_url = request.form.get('cover_url')
 
     # Prevent duplicate ISBNs
-    if isbn and Book.query.filter_by(isbn=isbn, user_id=current_user.id).first():
+    if isbn and Book.query().filter_by(isbn=isbn, user_id=current_user.id).first():
         flash('A book with this ISBN already exists.', 'danger')
         return redirect(url_for('main.search_books'))
 
@@ -629,7 +658,7 @@ def import_goodreads():
         # Skip books with missing or blank ISBN
         if not title or not author or not isbn or isbn == "":
             continue
-        if not Book.query.filter_by(isbn=isbn, user_id=current_user.id).first():
+        if not Book.query().filter_by(isbn=isbn, user_id=current_user.id).first():
             # Try Google Books first for comprehensive metadata
             google_data = get_google_books_cover(isbn, fetch_title_author=True)
             if google_data:
@@ -675,22 +704,10 @@ def import_goodreads():
                 average_rating=average_rating,
                 rating_count=rating_count
             )
-            db.session.add(book)
+            book.save()  # Was db.session.add()
             imported += 1
-    db.session.commit()
     flash(f'Imported {imported} books from Goodreads.', 'success')
     return redirect(url_for('main.add_book'))
-
-@bp.route('/download_db', methods=['GET'])
-@login_required
-def download_db():
-    db_path = current_app.config.get('SQLALCHEMY_DATABASE_URI').replace('sqlite:///', '')
-    return send_file(
-        db_path,
-        as_attachment=True,
-        download_name='books.db',
-        mimetype='application/octet-stream'
-    )
 
 @bp.route('/bulk_import', methods=['GET', 'POST'])
 @login_required
@@ -807,10 +824,10 @@ def community_activity():
     """Show activity from users who have enabled activity sharing"""
     
     # Get users who share their reading activity
-    sharing_users = User.query.filter_by(share_reading_activity=True, is_active=True).all()
+    sharing_users = User.query().filter_by(share_reading_activity=True, is_active=True).all()
     
     # Recent books (books finished in the last 30 days)
-    recent_finished_books = Book.query.join(User).filter(
+    recent_finished_books = Book.query().join(User).filter(
         User.share_reading_activity == True,
         User.is_active == True,
         Book.finish_date.isnot(None),
@@ -818,14 +835,14 @@ def community_activity():
     ).order_by(Book.finish_date.desc()).limit(20).all()
     
     # Recent reading logs (from last 7 days)
-    recent_logs = ReadingLog.query.join(User).filter(
+    recent_logs = ReadingLog.query().join(User).filter(
         User.share_reading_activity == True,
         User.is_active == True,
         ReadingLog.date >= (datetime.now().date() - timedelta(days=7))
     ).order_by(ReadingLog.date.desc()).limit(50).all()
     
     # Currently reading books from sharing users
-    currently_reading = Book.query.join(User).filter(
+    currently_reading = Book.query().join(User).filter(
         User.share_current_reading == True,
         User.is_active == True,
         Book.start_date.isnot(None),
@@ -833,7 +850,7 @@ def community_activity():
     ).order_by(Book.start_date.desc()).limit(20).all()
     
     # Get some statistics
-    total_books_this_month = Book.query.join(User).filter(
+    total_books_this_month = Book.query().join(User).filter(
         User.share_reading_activity == True,
         User.is_active == True,
         Book.finish_date.isnot(None),
@@ -854,23 +871,23 @@ def community_activity():
 @login_required
 def community_active_readers():
     """Show list of active readers"""
-    sharing_users = User.query.filter_by(share_reading_activity=True, is_active=True).all()
+    sharing_users = User.query().filter_by(share_reading_activity=True, is_active=True).all()
     
     # Get stats for each user
     user_stats = []
     for user in sharing_users:
-        books_this_month = Book.query.filter(
+        books_this_month = Book.query().filter(
             Book.user_id == user.id,
             Book.finish_date.isnot(None),
             Book.finish_date >= datetime.now().date().replace(day=1)
         ).count()
         
-        total_books = Book.query.filter(
+        total_books = Book.query().filter(
             Book.user_id == user.id,
             Book.finish_date.isnot(None)
         ).count()
         
-        currently_reading_count = Book.query.filter(
+        currently_reading_count = Book.query().filter(
             Book.user_id == user.id,
             Book.start_date.isnot(None),
             Book.finish_date.is_(None)
@@ -892,7 +909,7 @@ def community_active_readers():
 @login_required
 def community_books_this_month():
     """Show books finished this month"""
-    books = Book.query.join(User).filter(
+    books = Book.query().join(User).filter(
         User.share_reading_activity == True,
         User.is_active == True,
         Book.finish_date.isnot(None),
@@ -909,7 +926,7 @@ def community_books_this_month():
 @login_required
 def community_currently_reading():
     """Show books currently being read"""
-    books = Book.query.join(User).filter(
+    books = Book.query().join(User).filter(
         User.share_current_reading == True,
         User.is_active == True,
         Book.start_date.isnot(None),
@@ -922,7 +939,7 @@ def community_currently_reading():
 @login_required
 def community_recent_activity():
     """Show recent reading activity"""
-    recent_logs = ReadingLog.query.join(User).filter(
+    recent_logs = ReadingLog.query().join(User).filter(
         User.share_reading_activity == True,
         User.is_active == True,
         ReadingLog.date >= (datetime.now().date() - timedelta(days=7))
@@ -934,7 +951,9 @@ def community_recent_activity():
 @login_required
 def user_profile(user_id):
     """Show public profile for a user if they're sharing"""
-    user = User.query.get_or_404(user_id)
+    user = User.query().get(user_id)
+    if not user:
+        abort(404)
     
     # Check if user allows profile viewing
     if not user.share_reading_activity:
@@ -942,35 +961,35 @@ def user_profile(user_id):
         return redirect(url_for('main.community_activity'))
     
     # Get user's reading statistics
-    total_books = Book.query.filter(
+    total_books = Book.query().filter(
         Book.user_id == user.id,
         Book.finish_date.isnot(None)
     ).count()
     
-    books_this_year = Book.query.filter(
+    books_this_year = Book.query().filter(
         Book.user_id == user.id,
         Book.finish_date.isnot(None),
         Book.finish_date >= date(datetime.now().year, 1, 1)
     ).count()
     
-    books_this_month = Book.query.filter(
+    books_this_month = Book.query().filter(
         Book.user_id == user.id,
         Book.finish_date.isnot(None),
         Book.finish_date >= datetime.now().date().replace(day=1)
     ).count()
     
-    currently_reading = Book.query.filter(
+    currently_reading = Book.query().filter(
         Book.user_id == user.id,
         Book.start_date.isnot(None),
         Book.finish_date.is_(None)
     ).all() if user.share_current_reading else []
     
-    recent_finished = Book.query.filter(
+    recent_finished = Book.query().filter(
         Book.user_id == user.id,
         Book.finish_date.isnot(None)
     ).order_by(Book.finish_date.desc()).limit(10).all()
     
-    reading_logs_count = ReadingLog.query.filter_by(user_id=user.id).count()
+    reading_logs_count = ReadingLog.query().filter_by(user_id=user.id).count()
     
     return render_template('user_profile.html',
                          profile_user=user,
@@ -984,18 +1003,39 @@ def user_profile(user_id):
 @bp.route('/book/<uid>/assign', methods=['POST'])
 @login_required
 def assign_book(uid):
-    book = Book.query.filter_by(uid=uid).first_or_404()
+    book = Book.query().filter_by(uid=uid).first()
+    if not book:
+        abort(404)
     if not current_user.is_admin:
         flash('Only admins can assign books.', 'danger')
         return redirect(url_for('main.library'))
 
     user_id = request.form.get('user_id')
-    user = User.query.get(user_id)
+    user = User.query().get(user_id)
     if not user:
         flash('Invalid user selected.', 'danger')
         return redirect(url_for('main.library'))
 
     book.user_id = user.id
-    db.session.commit()
+    book.save()  # Save the updated book
     flash(f'Book "{book.title}" assigned to {user.username}.', 'success')
     return redirect(url_for('main.library'))
+
+@bp.route('/download_db')
+@login_required
+def download_db():
+    """Allows the user to download a copy of their database."""
+    try:
+        # Kuzu database is a directory, so we need to zip it
+        db_directory = os.path.join(current_app.root_path, '..', 'data', 'bibliotheca_graph.db')
+        
+        # Create a temporary zip file in the instance folder
+        zip_base_path = os.path.join(current_app.instance_path, f"bibliotheca_db_{current_user.id}_{datetime.now().strftime('%Y%m%d')}")
+        zip_path = shutil.make_archive(zip_base_path, 'zip', db_directory)
+        
+        return send_file(zip_path, as_attachment=True)
+        
+    except Exception as e:
+        current_app.logger.error(f"Error preparing database for download: {e}")
+        flash('Error preparing database for download.', 'danger')
+        return redirect(url_for('main.index'))

@@ -33,10 +33,24 @@ class Config:
     WTF_CSRF_ENABLED = True
     WTF_CSRF_TIME_LIMIT = 3600  # 1 hour
 
-    # Database - unified path handling for Docker and standalone
-    DATABASE_PATH = os.path.join(data_dir, 'books.db')
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or f"sqlite:///{DATABASE_PATH}"
-    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # Database Configuration - Kuzu Only (No SQL Fallback)
+    # Kuzu is required - app will not start without it
+    try:
+        import kuzu
+    except ImportError:
+        raise ImportError(
+            "Kuzu is required but not installed. "
+            "Please run the migration scripts:\n"
+            "1. ./setup_kuzu_migration.sh\n"
+            "2. ./migrate_to_kuzu.sh\n"
+            "Or install manually: pip install kuzu"
+        )
+    
+    # Force Kuzu usage - no SQL fallback
+    USE_KUZU = True
+    
+    # Kuzu Graph Database (Required)
+    KUZU_DATABASE_PATH = os.path.join(data_dir, 'bibliotheca_graph.db')
 
     # External APIs
     ISBN_API_KEY = os.environ.get('ISBN_API_KEY') or 'your_isbn_api_key'

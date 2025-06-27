@@ -1,7 +1,6 @@
 from datetime import date, timedelta, datetime
 import pytz
-from .models import ReadingLog
-from sqlalchemy import func
+from .graph_models import ReadingLog
 import calendar
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO

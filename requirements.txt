@@ -1,12 +1,10 @@
 Flask==2.2.2
-Flask-SQLAlchemy==2.5.1
 Flask-Login==0.6.3
 Flask-WTF==1.1.1
 WTForms==3.1.0
 Flask-Mail==0.9.1
 Werkzeug<2.3
 requests==2.28.1
-SQLAlchemy==1.4.39
 python-dotenv==0.20.0
 Pillow>=10.4.0
 pytz==2024.1
@@ -15,6 +13,7 @@ gunicorn
 psutil==5.9.0
 scrypt==0.8.24
 cryptography>=3.4.8
+kuzu>=0.0.8
 
 # Testing dependencies
 pytest==7.4.3

@@ -1,14 +1,11 @@
-version: '3.8'
-
 services:
-  MyBibliotheca:
+  mybibibliotheca:
     build: .
     ports:
-      - "5054:5054"
+      - "5051:5054"
     volumes:
-      # To change the data directory, change MyBibliotheca_data to your desired location on your local machine
-      # and ensure the application has write permissions to that directory.
-      - MyBibliotheca_data:/app/data
+      # Bind-mount your local data directory into the container
+      - /Users/gabrielking/bibliotheca/data:/app/data
     environment:
       # Security - MUST be set via .env file or environment
       - SECRET_KEY=${SECRET_KEY}
@@ -18,7 +15,3 @@ services:
       - TIMEZONE=${TIMEZONE:-UTC}
       - WORKERS=${WORKERS:-4}
     restart: unless-stopped
-
-volumes:
-  MyBibliotheca_data:
-    driver: local
